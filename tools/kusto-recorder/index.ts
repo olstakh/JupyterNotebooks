@@ -1,0 +1,25 @@
+import { randomUUID } from "node:crypto";
+import { resolve } from "node:path";
+import { projectRoot, upstreamConfig } from "./config.js";
+import { Recorder } from "./recorder.js";
+import { startProxy } from "./proxy.js";
+
+const runId = process.env.KUSTO_INVESTIGATION_ID
+  ?? `${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID().slice(0, 8)}`;
+const root = resolve(projectRoot, process.env.KUSTO_RECORDING_DIR ?? ".investigations");
+const recorder = new Recorder(root, runId);
+try {
+  const proxy = await startProxy(recorder, upstreamConfig());
+  console.error(`Kusto investigation notebook: ${recorder.notebookPath}`);
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    process.once(signal, () => {
+      void proxy.close().then(() => process.exit(0), (error) => {
+        console.error(error);
+        process.exit(1);
+      });
+    });
+  }
+} catch (error) {
+  console.error("Kusto recorder startup failed:", error);
+  process.exitCode = 1;
+}

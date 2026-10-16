@@ -1,0 +1,21 @@
+{
+  "name": "kusto-investigation-recorder",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "bun run \"tools\\kusto-recorder\\bootstrap.ts\"",
+    "test": "bun test",
+    "check": "tsc --noEmit",
+    "demo": "bun run \"tools\\kusto-recorder\\demo.ts\"",
+    "evidence": "bun run \"tools\\kusto-recorder\\evidence.ts\"",
+    "export:notebook": "bun run \"tools\\kusto-recorder\\export.ts\""
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.2",
+    "typescript": "5.9.3"
+  }
+}

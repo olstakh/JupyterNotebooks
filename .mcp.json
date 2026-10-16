@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "azure-mcp": {
+      "type": "stdio",
+      "command": "bun",
+      "args": ["run", "tools\\kusto-recorder\\bootstrap.ts"]
+    }
+  }
+}
