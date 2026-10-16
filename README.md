@@ -86,10 +86,12 @@ Each MCP server process starts a new run under:
     snapshot-*.ipynb        User-requested point-in-time exports
 ```
 
-The notebook includes readable KQL, exact MCP arguments, original response
-outputs, timing/status, existing tool-call intent, and any optional notes. Calls without a completed
-record remain visibly unfinished. Discovery through the Kusto router is also
-recorded; MCP `tools/list` itself is not an evidence query.
+The notebook shows a short introduction, one collapsed setup cell, and **KQL
+cells with results directly underneath**. Technical details (original MCP
+requests/responses, timing, evidence IDs, and optional notes) are preserved in
+notebook metadata and the JSON records, not duplicated in the visible notebook.
+Discovery/schema calls stay in the JSON records rather than cluttering the
+notebook. Calls without a completed record remain visibly unfinished.
 
 Query intent must be saved before forwarding, and a result must be saved before
 it is returned. Failed persistence withholds the result and reports an error.
@@ -109,16 +111,33 @@ There is no automatic query retry.
 
 ## Replay
 
-Open the notebook in VS Code or Jupyter using a Python/IPython kernel. Preserve a
-copy of the original before re-running cells. The setup cell and query cells use
-Python's standard library and IPython; they call the same recording proxy through
-a Bun replay helper, not directly through Kusto credentials.
+**Kqlmagic is not required.** Use a Python/IPython kernel in VS Code or Jupyter.
+Run the collapsed setup cell once (or use Run All); it registers the project's
+lightweight `%%kusto` cell magic. Then edit or run a query cell normally:
 
-Run the setup cell first. If the project cannot be found, set `recorder_root` in
-that cell or set `KUSTO_RECORDER_ROOT` to the project directory. Each setup execution
-allocates a new replay run ID, shared by subsequent query cells. Relative KQL time
-expressions are re-evaluated; this is live replay, not historical reconstruction.
-Discovery/schema cells retain original outputs but are not automatically replayed.
+```text
+%%kusto
+event
+| where ['time'] > ago(1h)
+| take 10
+```
+
+The magic sends the cell's KQL through the same recording proxy and displays only
+the results, not SDK/MCP plumbing. Only Bun and the project's files are needed
+beyond the Python/IPython kernel; there is no Kusto Python SDK or Kqlmagic
+installation. Do not use an ordinary Python cell without the `%%kusto` header:
+KQL is not Python.
+
+The first recorded target is the default connection. If an investigation queried
+other targets, those cells use `%%kusto connection2` (and so on); the setup cell
+contains the connection definitions. Sample-table calls become equivalent
+`table("name") | take N` query cells, with original requests preserved in metadata.
+
+Preserve a copy before re-running cells. Each setup execution creates a new replay
+run ID, shared by subsequent queries. Relative time expressions are re-evaluated:
+this is live replay, not historical reconstruction. If the project was moved or
+the notebook is opened elsewhere, set `KUSTO_RECORDER_ROOT` to the project folder.
+No credentials are embedded in the setup cell.
 
 ## Configuration
 
@@ -145,6 +164,12 @@ from bypassing it. Strong enforcement requires credential/network isolation.
 bun run demo
 bun run check
 bun test
+```
+
+Optional Python tests (requires IPython and nbformat, not Kqlmagic):
+
+```powershell
+python tools\kusto-recorder\test_notebook.py
 ```
 
 The demo makes two bounded live aggregate queries through the actual proxy and

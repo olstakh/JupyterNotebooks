@@ -51,7 +51,7 @@ test("exports evidence without annotations or an agent, preserving existing note
   expect(first.notebook).not.toBe(second.notebook);
   expect(await readFile(recorder.notebookPath, "utf8")).toBe(original);
   const notebook = JSON.parse(await readFile(first.notebook, "utf8"));
-  expect(notebook.cells.some((cell: { source: string }) => cell.source.includes("Check recent failures"))).toBe(true);
+  expect(notebook.cells.find((cell: { id: string }) => cell.id === entry.id).metadata.kusto_recorder.request.arguments.intent).toBe("Check recent failures");
   expect(notebook.cells.some((cell: { id: string }) => cell.id === entry.id)).toBe(true);
   expect((await recorder.entries()).every((item) => item.type === "execution")).toBe(true);
   expect((await listRuns(root))[0].lastActivity).toBe(runs[0].lastActivity);

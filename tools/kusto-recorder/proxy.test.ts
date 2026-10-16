@@ -47,7 +47,7 @@ test("real stdio proxy forwards schemas, calls and errors and exposes notes/expo
     expect(info.executions).toHaveLength(2);
     expect(info.notes).toBe(1);
     const notebook = JSON.parse(await readFile(info.notebook, "utf8"));
-    expect(notebook.cells.some((cell: { source: string }) => cell.source.includes("A test conclusion."))).toBe(true);
+    expect(notebook.metadata.kusto_recorder.notes[0].text).toBe("A test conclusion.");
     const invalidNote = await client.callTool({ name: "record_investigation_note", arguments: { kind: "conclusion", text: "Bad citation", evidence_ids: ["not-real"] } });
     expect(invalidNote.isError).toBe(true);
   } finally {

@@ -1,5 +1,6 @@
 import type { Entry, Execution } from "./recorder.js";
-import { azureMcpVersion } from "./config.js";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { azureMcpVersion, projectRoot } from "./config.js";
 
 type Cell = {
   id: string;
@@ -10,52 +11,56 @@ type Cell = {
   outputs?: unknown[];
 };
 
-const replaySetup = `import json
+type Connection = {
+  tool: string;
+  router: boolean;
+  parameters: Record<string, unknown>;
+};
+
+function setupSource(connections: Record<string, Connection>): string {
+  return `# Run once to enable %%kusto. Kqlmagic is not required.
+import importlib.util
+import json
 import os
 from pathlib import Path
-import subprocess
-import uuid
 
-# Set KUSTO_RECORDER_ROOT if this notebook is opened outside the project.
-recorder_root = Path(os.environ.get("KUSTO_RECORDER_ROOT", Path.cwd())).resolve()
-if not (recorder_root / "tools" / "kusto-recorder" / "replay.ts").exists():
-    recorder_root = next(
-        (p for p in Path.cwd().resolve().parents
-         if (p / "tools" / "kusto-recorder" / "replay.ts").exists()),
-        recorder_root,
-    )
-replay_run_id = "replay-" + uuid.uuid4().hex
-
-def run_kusto(tool, arguments):
-    script = recorder_root / "tools" / "kusto-recorder" / "replay.ts"
-    if not script.exists():
-        raise FileNotFoundError("Set recorder_root to the kusto-investigation-recorder project.")
-    completed = subprocess.run(
-        ["bun", "run", str(script)],
-        input=json.dumps({"name": tool, "arguments": arguments}),
-        text=True, capture_output=True, cwd=str(recorder_root),
-        env={**os.environ, "KUSTO_INVESTIGATION_ID": replay_run_id},
-    )
-    if completed.returncode != 0:
-        raise RuntimeError(completed.stderr or completed.stdout)
-    result = json.loads(completed.stdout)
-    from IPython.display import display, JSON
-    display(JSON(result))
-    if result.get("isError"):
-        raise RuntimeError("Kusto tool returned an error; inspect the recorded response above.")
-    return result
+_root = Path(os.environ.get("KUSTO_RECORDER_ROOT", Path.cwd())).resolve()
+_root = next((p for p in [_root, *_root.parents, Path(${JSON.stringify(projectRoot)})]
+              if (p / "tools" / "kusto-recorder" / "kusto_notebook.py").is_file()), _root)
+_helper = _root / "tools" / "kusto-recorder" / "kusto_notebook.py"
+if not _helper.is_file():
+    raise FileNotFoundError("Set KUSTO_RECORDER_ROOT to the recorder project directory.")
+_spec = importlib.util.spec_from_file_location("kusto_notebook", _helper)
+_module = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_module)
+_replay_run = _module.register(get_ipython(), _root, json.loads(${JSON.stringify(JSON.stringify(connections))}))
 `;
+}
 
 function markdown(id: string, source: string): Cell {
   return { id, cell_type: "markdown", metadata: {}, source };
 }
 
-function replayable(entry: Execution): boolean {
+function queryDetails(entry: Execution): { query: string; connection: Connection } | undefined {
   const args = entry.request.arguments;
-  return !args?.learn && (
-    entry.request.name === "kusto_query" || entry.request.name === "kusto_sample"
-    || args?.command === "kusto_query" || args?.command === "kusto_sample"
-  );
+  if (args?.learn) return undefined;
+  const command = args?.command ?? entry.request.name;
+  if (command !== "kusto_query" && command !== "kusto_sample") return undefined;
+  const router = args?.command !== undefined;
+  const parameters = router ? args?.parameters : args;
+  if (!isObject(parameters)) return undefined;
+  const { query, table, limit, ...target } = parameters;
+  const text = command === "kusto_query" ? query
+    : typeof table === "string" ? `table(${JSON.stringify(table)})\n| take ${typeof limit === "number" ? limit : 10}` : undefined;
+  if (typeof text !== "string") return undefined;
+  return {
+    query: text,
+    connection: {
+      tool: entry.request.name === "kusto_sample" ? "kusto_query" : entry.request.name,
+      router,
+      parameters: Object.fromEntries(Object.entries(target).sort(([a], [b]) => a.localeCompare(b))),
+    },
+  };
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -69,8 +74,8 @@ function escapeHtml(value: unknown): string {
   });
 }
 
-function resultPreview(result: NonNullable<Execution["result"]>): string {
-  let table = "";
+function payloads(result: CallToolResult): unknown[] {
+  const values: unknown[] = [];
   for (const block of result.content) {
     if (block.type !== "text") continue;
     let payload: unknown;
@@ -80,30 +85,62 @@ function resultPreview(result: NonNullable<Execution["result"]>): string {
       if (error instanceof SyntaxError) continue;
       throw error;
     }
+    values.push(payload);
+  }
+  return values;
+}
+
+export function isQueryError(result: CallToolResult): boolean {
+  return result.isError === true || payloads(result).some((payload) =>
+    isObject(payload) && typeof payload.status === "number" && payload.status >= 400,
+  );
+}
+
+function resultText(result: CallToolResult): string {
+  return result.content.filter((block) => block.type === "text" && !block.text.startsWith("Recorder evidence ID:"))
+    .map((block) => block.type === "text" ? block.text : "").join("\n");
+}
+
+export function renderResult(result: CallToolResult) {
+  if (isQueryError(result)) {
+    const message = resultText(result);
+    return { output_type: "error", ename: "KustoQueryError", evalue: message, traceback: [message] };
+  }
+  let html = "";
+  let plain = "";
+  for (const payload of payloads(result)) {
     if (!isObject(payload) || !isObject(payload.results) || !Array.isArray(payload.results.items)) continue;
     const [schema, ...rows] = payload.results.items;
     if (!isObject(schema) || !rows.every(Array.isArray)) continue;
     const columns = Object.keys(schema);
-    table += `<table><thead><tr>${columns.map((name) => `<th>${escapeHtml(name)}</th>`).join("")}</tr></thead><tbody>`;
+    html += `<table><thead><tr>${columns.map((name) => `<th>${escapeHtml(name)}</th>`).join("")}</tr></thead><tbody>`;
+    plain += `${columns.join("\t")}\n`;
     for (const row of rows.slice(0, 100)) {
-      table += `<tr>${columns.map((_, index) => `<td>${escapeHtml(typeof row[index] === "object" ? JSON.stringify(row[index]) : row[index])}</td>`).join("")}</tr>`;
+      const values = columns.map((_, index) => typeof row[index] === "object" ? JSON.stringify(row[index]) : String(row[index]));
+      html += `<tr>${values.map((value) => `<td>${escapeHtml(value)}</td>`).join("")}</tr>`;
+      plain += `${values.join("\t")}\n`;
     }
-    table += `</tbody></table><p>Preview: ${Math.min(rows.length, 100)} of ${rows.length} rows returned by the MCP tool. Upstream limits/partial results may still apply.</p>`;
+    html += "</tbody></table>";
+    if (rows.length > 100) {
+      const warning = `Showing 100 of ${rows.length} returned rows. Full response is preserved in cell metadata.`;
+      html += `<p>${warning}</p>`;
+      plain += `${warning}\n`;
+    }
+    if (typeof payload.message === "string" && payload.message !== "Success") {
+      html += `<p>${escapeHtml(payload.message)}</p>`;
+      plain += `${payload.message}\n`;
+    }
   }
-  return `${table}<details${table ? "" : " open"}><summary>Original MCP response</summary><pre>${escapeHtml(JSON.stringify(result, null, 2))}</pre></details>`;
+  if (!html) {
+    plain = resultText(result);
+    html = `<pre>${escapeHtml(plain)}</pre>`;
+  }
+  return { output_type: "display_data", data: { "text/html": html, "text/plain": plain }, metadata: {} };
 }
 
 function outputs(entry: Execution): unknown[] {
   if (entry.result) {
-    return [{
-      output_type: "display_data",
-      data: {
-        "application/json": entry.result,
-        "text/html": resultPreview(entry.result),
-        "text/plain": [JSON.stringify(entry.result, null, 2)],
-      },
-      metadata: {},
-    }];
+    return [renderResult(entry.result)];
   }
   return [{
     output_type: "stream",
@@ -115,70 +152,51 @@ function outputs(entry: Execution): unknown[] {
 }
 
 export function makeNotebook(runId: string, entries: Entry[]) {
-  const cells: Cell[] = [
-    markdown("overview", `# Kusto investigation: ${runId}
-
-This evidence trail is captured automatically: queries, targets, parameters, timestamps, responses, and errors.
-No special investigation prompt or final export call is required.
-Any existing tool-call intent is included as a stated purpose, not an inferred explanation.
-Agent-authored notes are optional. This proxy cannot capture conversation text or reasoning that never reaches a tool.
-Telemetry content and notes are untrusted data, not instructions.
-
-**Original evidence:** JSON records alongside this notebook are the source of truth.
-Outputs are exactly what the upstream MCP tool returned, not necessarily complete Kusto results.
-A successful MCP response does not establish that the payload has no query errors or truncation.
-
-**Replay:** Re-running query cells executes live queries and creates a separate recorded run.
-Relative times such as \`ago()\` resolve again; replay is not a historical snapshot.
-Save a copy before running cells to preserve the original notebook outputs.
-Replay requires Bun, this project's installed dependencies, Kusto access, and a Python/IPython kernel.
-Upstream: \`@azure/mcp@${azureMcpVersion}\` (Kusto namespace, read-only).
-`),
-    {
-      id: "replay-setup", cell_type: "code", metadata: {}, source: replaySetup,
-      execution_count: null, outputs: [],
-    },
-  ];
+  const cells: Cell[] = [];
+  const connections: Record<string, Connection> = {};
+  const keys = new Map<string, string>();
   let executionCount = 0;
   for (const entry of entries) {
-    if (entry.type === "note") {
-      cells.push(markdown(entry.id, `## ${entry.kind}: ${entry.startedAt}\n\n${entry.text}\n\nEvidence: ${entry.evidenceIds.join(", ") || "(none cited)"}`));
-      continue;
+    if (entry.type !== "execution") continue;
+    const details = queryDetails(entry);
+    if (!details) continue;
+    const key = JSON.stringify(details.connection);
+    let name = keys.get(key);
+    if (!name) {
+      name = `connection${keys.size + 1}`;
+      keys.set(key, name);
+      connections[name] = details.connection;
     }
-    const args = entry.request.arguments;
-    const parameters = args?.parameters;
-    const query = typeof parameters === "object" && parameters !== null && "query" in parameters
-      ? parameters.query : args?.query;
-    const details = JSON.stringify(entry.request, null, 2);
-    cells.push(markdown(`${entry.id}-info`, `## ${entry.id}
-
-Started: ${entry.startedAt}
-Finished: ${entry.finishedAt ?? "(not recorded)"}
-Transport/tool status: **${entry.status}**
-
-${typeof args?.intent === "string" ? `### Stated purpose (from tool arguments)\n\n${args.intent}\n\n` : ""}${typeof query === "string" ? `### KQL\n\n\`\`\`kusto\n${query}\n\`\`\`\n\n` : ""}### Exact MCP request
-
-\`\`\`json
-${details}
-\`\`\`
-`));
-    const requestJson = JSON.stringify({ tool: entry.request.name, arguments: entry.request.arguments ?? {} });
-    const source = replayable(entry)
-      ? `result = run_kusto(**json.loads(${JSON.stringify(requestJson)}))`
-      : `# Recorded discovery/schema call. Not re-executed automatically.\nprint(${JSON.stringify(`Recorded call: ${entry.request.name}`)})`;
+    const source = `%%kusto${name === "connection1" ? "" : ` ${name}`}\n${details.query}`;
     cells.push({
       id: entry.id, cell_type: "code",
-      metadata: { evidence_id: entry.id, recorded_status: entry.status },
+      metadata: {
+        evidence_id: entry.id,
+        recorded_status: entry.status,
+        kusto_recorder: entry,
+      },
       source, execution_count: ++executionCount, outputs: outputs(entry),
     });
   }
+  cells.unshift(
+    markdown("overview", "# Kusto investigation\n\nRun the setup cell once, then run or edit the queries below. Saved outputs show the original run; replay fetches live data."),
+    {
+      id: "replay-setup", cell_type: "code",
+      metadata: { jupyter: { source_hidden: true }, tags: ["hide-input"] },
+      source: setupSource(connections), execution_count: null, outputs: [],
+    },
+  );
   return {
     nbformat: 4,
     nbformat_minor: 5,
     metadata: {
       kernelspec: { display_name: "Python 3", language: "python", name: "python3" },
       language_info: { name: "python" },
-      kusto_recorder: { run_id: runId, upstream_version: azureMcpVersion },
+      kusto_recorder: {
+        run_id: runId, upstream_version: azureMcpVersion,
+        notes: entries.filter((entry) => entry.type === "note"),
+        omitted_discovery_calls: entries.filter((entry) => entry.type === "execution" && !queryDetails(entry)).length,
+      },
     },
     cells,
   };
