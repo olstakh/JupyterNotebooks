@@ -1,6 +1,6 @@
 import type { Entry, Execution } from "./recorder.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { azureMcpVersion, projectRoot } from "./config.js";
+import { azureMcpVersion, projectRoot, type ReplayUpstream } from "./config.js";
 
 type Cell = {
   id: string;
@@ -17,8 +17,8 @@ type Connection = {
   parameters: Record<string, unknown>;
 };
 
-function setupSource(connections: Record<string, Connection>): string {
-  return `# Run once to enable %%kusto. Kqlmagic is not required.
+function setupSource(connections: Record<string, Connection>, upstream?: ReplayUpstream): string {
+  return `# Run once to enable %%kusto and %%mcp. Kqlmagic is not required.
 import importlib.util
 import json
 import os
@@ -33,7 +33,7 @@ if not _helper.is_file():
 _spec = importlib.util.spec_from_file_location("kusto_notebook", _helper)
 _module = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_module)
-_replay_run = _module.register(get_ipython(), _root, json.loads(${JSON.stringify(JSON.stringify(connections))}))
+_replay_run = _module.register(get_ipython(), _root, json.loads(${JSON.stringify(JSON.stringify(connections))}), upstream=json.loads(${JSON.stringify(JSON.stringify(upstream ?? null))}))
 `;
 }
 
@@ -97,8 +97,9 @@ export function isQueryError(result: CallToolResult): boolean {
 }
 
 function resultText(result: CallToolResult): string {
-  return result.content.filter((block) => block.type === "text" && !block.text.startsWith("Recorder evidence ID:"))
+  const text = result.content.filter((block) => block.type === "text" && !block.text.startsWith("Recorder evidence ID:"))
     .map((block) => block.type === "text" ? block.text : "").join("\n");
+  return text || JSON.stringify(result.structuredContent ?? result.content, null, 2);
 }
 
 export function renderResult(result: CallToolResult) {
@@ -122,7 +123,7 @@ export function renderResult(result: CallToolResult) {
     }
     html += "</tbody></table>";
     if (rows.length > 100) {
-      const warning = `Showing 100 of ${rows.length} returned rows. Full response is preserved in cell metadata.`;
+      const warning = `Showing 100 of ${rows.length} returned rows. Full response is preserved in notebook metadata.`;
       html += `<p>${warning}</p>`;
       plain += `${warning}\n`;
     }
@@ -151,7 +152,7 @@ function outputs(entry: Execution): unknown[] {
   }];
 }
 
-export function makeNotebook(runId: string, entries: Entry[]) {
+export function makeNotebook(runId: string, entries: Entry[], upstream?: ReplayUpstream) {
   const cells: Cell[] = [];
   const connections: Record<string, Connection> = {};
   const keys = new Map<string, string>();
@@ -159,7 +160,17 @@ export function makeNotebook(runId: string, entries: Entry[]) {
   for (const entry of entries) {
     if (entry.type !== "execution") continue;
     const details = queryDetails(entry);
-    if (!details) continue;
+    if (!details) {
+      if (entry.request.arguments?.learn === true) continue;
+      cells.push({
+        id: entry.id, cell_type: "code",
+        metadata: { evidence_id: entry.id, recorded_status: entry.status },
+        source: `%%mcp\n${JSON.stringify(entry.request, null, 2)}`,
+        execution_count: entry.status === "started" ? null : ++executionCount,
+        outputs: outputs(entry),
+      });
+      continue;
+    }
     const key = JSON.stringify(details.connection);
     let name = keys.get(key);
     if (!name) {
@@ -167,23 +178,27 @@ export function makeNotebook(runId: string, entries: Entry[]) {
       keys.set(key, name);
       connections[name] = details.connection;
     }
-    const source = `%%kusto${name === "connection1" ? "" : ` ${name}`}\n${details.query}`;
+    const intent = entry.request.arguments?.intent;
+    const comment = typeof intent === "string" && intent.trim()
+      ? intent.trim().split(/\r\n|[\r\n\u0085\u2028\u2029]/u).map((line) => `// Intent: ${line}`).join("\n") : "";
+    const alreadyCommented = comment && (details.query === comment || details.query.startsWith(`${comment}\n`) || details.query.startsWith(`${comment}\r\n`));
+    const query = comment && !alreadyCommented ? `${comment}\n${details.query}` : details.query;
+    const source = `%%kusto${name === "connection1" ? "" : ` ${name}`}\n${query}`;
     cells.push({
       id: entry.id, cell_type: "code",
       metadata: {
         evidence_id: entry.id,
         recorded_status: entry.status,
-        kusto_recorder: entry,
       },
-      source, execution_count: ++executionCount, outputs: outputs(entry),
+      source, execution_count: entry.status === "started" ? null : ++executionCount, outputs: outputs(entry),
     });
   }
   cells.unshift(
-    markdown("overview", "# Kusto investigation\n\nRun the setup cell once, then run or edit the queries below. Saved outputs show the original run; replay fetches live data."),
+    markdown("overview", "# Kusto investigation\n\nRun the setup cell once, then run or edit the queries below. Saved outputs show the original run; replay fetches live data. Unrecognized tool formats use editable %%mcp request cells. Review recorded commands and requests before replay."),
     {
       id: "replay-setup", cell_type: "code",
       metadata: { jupyter: { source_hidden: true }, tags: ["hide-input"] },
-      source: setupSource(connections), execution_count: null, outputs: [],
+      source: setupSource(connections, upstream), execution_count: null, outputs: [],
     },
   );
   return {
@@ -193,9 +208,9 @@ export function makeNotebook(runId: string, entries: Entry[]) {
       kernelspec: { display_name: "Python 3", language: "python", name: "python3" },
       language_info: { name: "python" },
       kusto_recorder: {
-        run_id: runId, upstream_version: azureMcpVersion,
-        notes: entries.filter((entry) => entry.type === "note"),
-        omitted_discovery_calls: entries.filter((entry) => entry.type === "execution" && !queryDetails(entry)).length,
+        format_version: 2,
+        run_id: runId, ...(upstream ? { upstream } : { upstream_version: azureMcpVersion }), entries,
+        omitted_discovery_calls: entries.filter((entry) => entry.type === "execution" && entry.request.arguments?.learn === true).length,
       },
     },
     cells,

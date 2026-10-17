@@ -3,7 +3,11 @@
     "azure-mcp": {
       "type": "stdio",
       "command": "bun",
-      "args": ["run", "tools\\kusto-recorder\\bootstrap.ts"]
+      "args": [
+        "run", "tools\\kusto-recorder\\bootstrap.ts", "--",
+        "bun", "x", "@azure/mcp@3.0.0", "server", "start",
+        "--namespace", "kusto", "--read-only"
+      ]
     }
   }
 }

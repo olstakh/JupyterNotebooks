@@ -1,6 +1,6 @@
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
-import { atomicWrite } from "./recorder.js";
+import { mkdir, open, readFile, unlink } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
+import { atomicWrite, Recorder } from "./recorder.js";
 
 export type Session = {
   pid: number;
@@ -45,11 +45,43 @@ export function isSessionActive(session: Session | undefined): boolean {
 }
 
 export async function registerSession(directory: string): Promise<() => Promise<void>> {
+  await mkdir(directory, { recursive: true });
+  const previous = await readSession(directory);
+  if (isSessionActive(previous)) throw new Error(`Recorder run already has an active writer: ${directory}`);
+  if (previous) await new Recorder(dirname(directory), basename(directory)).entries();
+  const lockPath = join(directory, ".writer.lock");
+  let lock;
+  try {
+    lock = await open(lockPath, "wx");
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "EEXIST") {
+      throw new Error(`Recorder run is locked: ${directory}. Use a different run ID. After a crash, remove .writer.lock only after confirming its owning process has exited.`);
+    }
+    throw error;
+  }
   const session: Session = { pid: process.pid, startedAt: new Date().toISOString() };
-  await atomicWrite(join(directory, "session.json"), JSON.stringify(session, null, 2));
+  try {
+    try {
+      await lock.writeFile(JSON.stringify(session), "utf8");
+      await lock.sync();
+    } finally {
+      await lock.close();
+    }
+    await atomicWrite(join(directory, "session.json"), JSON.stringify(session, null, 2));
+  } catch (error) {
+    await unlink(lockPath);
+    throw error;
+  }
+  let finished = false;
   return async () => {
-    await atomicWrite(join(directory, "session.json"), JSON.stringify({
-      ...session, endedAt: new Date().toISOString(),
-    }, null, 2));
+    if (finished) return;
+    finished = true;
+    try {
+      await atomicWrite(join(directory, "session.json"), JSON.stringify({
+        ...session, endedAt: new Date().toISOString(),
+      }, null, 2));
+    } finally {
+      await unlink(lockPath);
+    }
   };
 }

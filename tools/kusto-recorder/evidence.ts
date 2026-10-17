@@ -2,7 +2,6 @@ import { readdir, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { Recorder, atomicWrite } from "./recorder.js";
-import { makeNotebook } from "./notebook.js";
 import { projectRoot } from "./config.js";
 import { isMissing, isSessionActive, readSession } from "./sessions.js";
 
@@ -60,11 +59,10 @@ export function selectRun(runs: Run[], explicitId?: string): Run {
 
 export async function snapshotEvidence(root: string, runId: string): Promise<{ notebook: string; executions: number }> {
   const recorder = new Recorder(root, runId);
-  const entries = await recorder.entries();
-  const notebook = makeNotebook(runId, entries);
+  const notebook = await recorder.snapshotNotebook();
   const path = join(recorder.directory, `snapshot-${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID().slice(0, 8)}.ipynb`);
   await atomicWrite(path, JSON.stringify(notebook, null, 2));
-  return { notebook: path, executions: entries.filter((entry) => entry.type === "execution").length };
+  return { notebook: path, executions: notebook.metadata.kusto_recorder.entries.filter((entry) => entry.type === "execution").length };
 }
 
 if (import.meta.main) {

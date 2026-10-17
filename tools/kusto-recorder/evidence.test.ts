@@ -51,7 +51,8 @@ test("exports evidence without annotations or an agent, preserving existing note
   expect(first.notebook).not.toBe(second.notebook);
   expect(await readFile(recorder.notebookPath, "utf8")).toBe(original);
   const notebook = JSON.parse(await readFile(first.notebook, "utf8"));
-  expect(notebook.cells.find((cell: { id: string }) => cell.id === entry.id).metadata.kusto_recorder.request.arguments.intent).toBe("Check recent failures");
+  expect(notebook.metadata.kusto_recorder.entries.find((item: { id: string }) => item.id === entry.id).request.arguments.intent).toBe("Check recent failures");
+  expect(notebook.cells.find((cell: { id: string }) => cell.id === entry.id).source).toStartWith("%%kusto\n// Intent: Check recent failures\n");
   expect(notebook.cells.some((cell: { id: string }) => cell.id === entry.id)).toBe(true);
   expect((await recorder.entries()).every((item) => item.type === "execution")).toBe(true);
   expect((await listRuns(root))[0].lastActivity).toBe(runs[0].lastActivity);
@@ -81,4 +82,55 @@ test("command exports a saved run offline and prints its notebook path", async (
   const path = new TextDecoder().decode(completed.stdout).trim();
   expect(path).toContain("snapshot-");
   expect(JSON.parse(await readFile(path, "utf8")).metadata.kusto_recorder.run_id).toBe("offline");
+});
+
+test("rejects a second writer for the same run and releases the lock on shutdown", async () => {
+  const root = await setup();
+  const recorder = new Recorder(root, "exclusive");
+  await recorder.initialize();
+  const finish = await registerSession(recorder.directory);
+  await expect(registerSession(recorder.directory)).rejects.toThrow("active writer");
+  await finish();
+  const finishAgain = await registerSession(recorder.directory);
+  await finishAgain();
+});
+
+test("snapshots an in-flight query without changing live evidence or the later result", async () => {
+  const root = await setup();
+  const recorder = new Recorder(root, "pending");
+  await recorder.initialize();
+  let resume!: () => void;
+  let entered!: () => void;
+  const gate = new Promise<void>((resolve) => { resume = resolve; });
+  const started = new Promise<void>((resolve) => { entered = resolve; });
+  const running = recorder.execute({
+    name: "kusto", arguments: { intent: "Check failures", command: "kusto_query", parameters: { database: "test", query: "print 1" } },
+  }, async () => {
+    entered();
+    await gate;
+    return { content: [{ type: "text", text: "done" }] };
+  });
+  await started;
+  try {
+    const snapshot = await snapshotEvidence(root, recorder.runId);
+    const original = await readFile(snapshot.notebook, "utf8");
+    expect(JSON.parse(original).metadata.kusto_recorder.entries[0].status).toBe("started");
+    resume();
+    await running;
+    expect((await recorder.entries())[0]).toMatchObject({ status: "succeeded" });
+    expect(await readFile(snapshot.notebook, "utf8")).toBe(original);
+  } finally {
+    resume();
+    await running;
+  }
+});
+
+test("a leftover writer lock prevents accidental reuse but not evidence export", async () => {
+  const root = await setup();
+  const recorder = new Recorder(root, "interrupted");
+  await recorder.initialize();
+  await writeFile(join(recorder.directory, ".writer.lock"), "{}");
+  await expect(registerSession(recorder.directory)).rejects.toThrow("locked");
+  const snapshot = await snapshotEvidence(root, recorder.runId);
+  expect(snapshot.notebook).toContain("snapshot-");
 });

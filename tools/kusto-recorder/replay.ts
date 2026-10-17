@@ -2,14 +2,16 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { CallToolRequestSchema, CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { join } from "node:path";
-import { inheritedEnvironment, projectRoot } from "./config.js";
+import { inheritedEnvironment, parseReplayUpstream, projectRoot } from "./config.js";
 import { isQueryError, renderResult } from "./notebook.js";
 
 const client = new Client({ name: "kusto-notebook-replay", version: "0.1.0" });
+const upstream = process.env.KUSTO_REPLAY_UPSTREAM === undefined ? undefined
+  : parseReplayUpstream(JSON.parse(process.env.KUSTO_REPLAY_UPSTREAM));
 const transport = new StdioClientTransport({
   command: process.execPath,
-  args: ["run", join(import.meta.dir, "bootstrap.ts")],
-  cwd: projectRoot,
+  args: ["run", join(import.meta.dir, "bootstrap.ts"), ...(upstream ? ["--", upstream.command, ...upstream.args] : [])],
+  cwd: upstream?.cwd ?? projectRoot,
   env: inheritedEnvironment(),
   stderr: "inherit",
 });

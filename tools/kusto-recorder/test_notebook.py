@@ -59,6 +59,36 @@ class NotebookTests(unittest.TestCase):
         self.assertEqual(request["arguments"]["database"], "other")
         self.assertNotIn("parameters", request["arguments"])
 
+    @patch("IPython.display.display")
+    @patch("subprocess.run")
+    def test_replay_preserves_intent_comments_and_original_query(self, run, display):
+        run.return_value = subprocess.CompletedProcess([], 0, json.dumps(OUTPUT), "")
+        query = "// Intent: Check failures\n// Intent: Compare regions\nprint Value = 7"
+        self.shell.run_cell_magic("kusto", "", query)
+        request = json.loads(run.call_args.kwargs["input"])
+        self.assertEqual(request["arguments"]["intent"], "Check failures\nCompare regions")
+        self.assertEqual(request["arguments"]["parameters"]["query"], query)
+
+    @patch("IPython.display.display")
+    @patch("subprocess.run")
+    def test_generic_replay_preserves_request_and_original_upstream(self, run, display):
+        upstream = {"command": "team-mcp", "args": ["--team", "two words"], "cwd": str(ROOT)}
+        kusto_notebook.register(self.shell, ROOT, {}, upstream=upstream)
+        run.return_value = subprocess.CompletedProcess([], 0, json.dumps(OUTPUT), "")
+        request = {"name": "team_query", "arguments": {"kql": "print 7", "workspace": "team"}}
+        self.shell.run_cell_magic("mcp", "", json.dumps(request))
+        self.assertEqual(json.loads(run.call_args.kwargs["input"]), request)
+        self.assertEqual(json.loads(run.call_args.kwargs["env"]["KUSTO_REPLAY_UPSTREAM"]), upstream)
+        display.assert_called_once_with(OUTPUT["data"], raw=True)
+
+    @patch("subprocess.run")
+    def test_invalid_generic_request_does_not_execute(self, run):
+        with self.assertRaisesRegex(ValueError, "tool name"):
+            self.shell.run_cell_magic("mcp", "", '{"arguments": {}}')
+        with self.assertRaisesRegex(ValueError, "below %%mcp"):
+            self.shell.run_cell_magic("mcp", "unexpected", '{"name": "query"}')
+        run.assert_not_called()
+
     @patch("subprocess.run")
     def test_invalid_connection_and_empty_query_do_not_execute(self, run):
         with self.assertRaisesRegex(ValueError, "Unknown Kusto connection"):
