@@ -1,7 +1,8 @@
 import { readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { Recorder, atomicWrite } from "./recorder.js";
+import { atomicWrite } from "./recorder.js";
+import { createRecorder } from "./application.js";
 import { recordingRoot } from "./config.js";
 import { isMissing, isSessionActive, readSession } from "./sessions.js";
 
@@ -23,7 +24,7 @@ export async function listRuns(root: string): Promise<Run[]> {
   const runs: Run[] = [];
   for (const directory of directories) {
     if (!directory.isDirectory() || !/^[a-zA-Z0-9_-]{1,100}$/.test(directory.name)) continue;
-    const recorder = new Recorder(root, directory.name);
+    const recorder = createRecorder(root, directory.name);
     const names = await readdir(recorder.directory);
     if (!names.includes("session.json") && !names.includes("investigation.ipynb")
       && !names.some((name) => /^E-[\da-f-]+(?:\.started)?\.json$/.test(name))) continue;
@@ -58,7 +59,7 @@ export function selectRun(runs: Run[], explicitId?: string): Run {
 }
 
 export async function snapshotEvidence(root: string, runId: string): Promise<{ notebook: string; executions: number }> {
-  const recorder = new Recorder(root, runId);
+  const recorder = createRecorder(root, runId);
   const notebook = await recorder.snapshotNotebook();
   const path = join(recorder.directory, `snapshot-${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID().slice(0, 8)}.ipynb`);
   await atomicWrite(path, JSON.stringify(notebook, null, 2));

@@ -1,8 +1,6 @@
 import { resolve } from "node:path";
-import type { StdioServerParameters } from "@modelcontextprotocol/sdk/client/stdio.js";
 
 export const projectRoot = resolve(import.meta.dir, "..", "..");
-export const azureMcpVersion = "3.0.0";
 
 export function recordingRoot(value = process.env.KUSTO_RECORDING_DIR, cwd = process.cwd()): string {
   if (value !== undefined && !value.trim()) throw new Error("KUSTO_RECORDING_DIR must not be empty.");
@@ -29,27 +27,4 @@ export function inheritedEnvironment(): Record<string, string> {
   return Object.fromEntries(
     Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
   );
-}
-
-export function upstreamConfig(args = process.argv.slice(2)): StdioServerParameters {
-  if (args.length) {
-    const original = args[0] === "--" ? args.slice(1) : args;
-    if (!original[0]?.trim() || original[0].startsWith("-")) {
-      throw new Error("Usage: bootstrap.ts -- <original MCP command> [original arguments...]");
-    }
-    return {
-      command: original[0],
-      args: original.slice(1),
-      cwd: process.cwd(),
-      env: inheritedEnvironment(),
-      stderr: "inherit",
-    };
-  }
-  return {
-    command: process.execPath,
-    args: ["x", `@azure/mcp@${azureMcpVersion}`, "server", "start", "--namespace", "kusto", "--read-only"],
-    cwd: process.cwd(),
-    env: inheritedEnvironment(),
-    stderr: "inherit",
-  };
 }

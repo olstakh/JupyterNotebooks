@@ -212,6 +212,15 @@ still needs the recorder project and approved authentication.
 Other tool schemas appear as editable `%%mcp` JSON request cells with their saved
 results, rather than being silently omitted or guessed into an Azure query.
 
+New recordings use evidence format **3**. Each execution includes an `adapter`
+identifier and JSON request/response evidence; replay configurations are stored
+per adapter in `metadata.kusto_recorder.adapter_configurations`. The current MCP
+adapter also preserves the existing upstream metadata fields. Version-2 notebooks
+and older JSON/cell recordings remain readable: their executions are identified
+as MCP, and the old `tool_error` status maps to the transport-neutral `failed`
+status. Snapshot export leaves the old source intact; initializing a writer
+updates its source to the current format.
+
 The recorder atomically saves a pending entry **before forwarding** a call, then
 updates the same entry with the response or error **before returning** results.
 Failed pending persistence prevents execution; failed result persistence withholds
@@ -341,6 +350,34 @@ MCP registration does not prevent an agent with other credentials/network access
 from bypassing it. Strong enforcement requires credential/network isolation.
 
 ## Demo and development
+
+### Adapter boundaries
+
+Only the MCP adapter is implemented today. REST/CLI execution and alternative
+storage backends are not included in this refactor.
+
+- `model.ts` defines JSON evidence, execution statuses, `ExecutionAdapter`, and
+  `NotebookAdapter`, without importing the MCP SDK.
+- `recorder.ts` owns pending/completion persistence, failures, serialized writes,
+  and source-integrity checks. `execute(adapter, request, invoke)` returns the
+  original typed result after saving the adapter's JSON evidence.
+- `notebook.ts` builds cells from adapter-provided query/result presentations.
+  Unsupported adapter evidence stays readable, and its replay cell fails
+  explicitly rather than treating it as an MCP call.
+- `adapters\mcp.ts` owns MCP schemas, Azure query recognition, error detection,
+  result rendering, launch defaults, and notebook setup.
+- `adapters\mcp-replay.ts` and `proxy.ts` own the existing MCP execution paths.
+  `application.ts` registers the installed adapter for recording and offline export.
+
+A future adapter supplies request/result capture and error classification through
+`ExecutionAdapter`. Its `NotebookAdapter` supplies stored-evidence validation,
+query/result presentation, and setup/configuration handling. Register it at the
+application boundary and wire its execution/replay entry point; no MCP-shaped
+request or response is required by the shared recorder.
+
+Adapters must exclude authentication secrets from captured evidence and preserve
+the native client's behavior. The recorder does not acquire credentials or retry
+queries. Whole-notebook persistence and the single-writer limitation are unchanged.
 
 ```powershell
 bun run demo

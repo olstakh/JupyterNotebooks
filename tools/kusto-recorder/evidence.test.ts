@@ -2,7 +2,8 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { Recorder } from "./recorder.js";
+import { createRecorder } from "./application.js";
+import { mcpAdapter } from "./adapters/mcp.js";
 import { listRuns, selectRun, snapshotEvidence, type Run } from "./evidence.js";
 import { registerSession } from "./sessions.js";
 
@@ -36,12 +37,12 @@ test("does not guess between simultaneous recorder sessions", () => {
 
 test("exports evidence without annotations or an agent, preserving existing notebooks", async () => {
   const root = await setup();
-  const recorder = new Recorder(root, "current");
+  const recorder = createRecorder(root, "current");
   await recorder.initialize();
   const finish = await registerSession(recorder.directory);
-  const { entry } = await recorder.execute({
+  const { entry } = await recorder.execute(mcpAdapter, {
     name: "kusto", arguments: { intent: "Check recent failures", command: "kusto_query", parameters: { query: "print 1", database: "test" } },
-  }, async () => ({ content: [{ type: "text", text: "Recorded response" }] }));
+  }, async () => ({ content: [{ type: "text" as const, text: "Recorded response" }] }));
   const original = await readFile(recorder.notebookPath, "utf8");
   const runs = await listRuns(root);
   expect(runs).toHaveLength(1);
@@ -63,7 +64,7 @@ test("exports evidence without annotations or an agent, preserving existing note
 test("supports legacy recordings and rejects corrupt session metadata", async () => {
   const root = await setup();
   expect(await listRuns(join(root, "not-created"))).toEqual([]);
-  const recorder = new Recorder(root, "legacy");
+  const recorder = createRecorder(root, "legacy");
   await recorder.initialize();
   expect((await listRuns(root))[0]).toMatchObject({ id: "legacy", active: false });
   await writeFile(join(recorder.directory, "session.json"), '{"pid":"wrong"}');
@@ -72,7 +73,7 @@ test("supports legacy recordings and rejects corrupt session metadata", async ()
 
 test("command exports a saved run offline and prints its notebook path", async () => {
   const root = await setup();
-  const recorder = new Recorder(root, "offline");
+  const recorder = createRecorder(root, "offline");
   await recorder.initialize();
   const completed = Bun.spawnSync([process.execPath, "run", join(import.meta.dir, "evidence.ts")], {
     env: { ...process.env, KUSTO_RECORDING_DIR: root, KUSTO_INVESTIGATION_ID: "" },
@@ -86,7 +87,7 @@ test("command exports a saved run offline and prints its notebook path", async (
 
 test("rejects a second writer for the same run and releases the lock on shutdown", async () => {
   const root = await setup();
-  const recorder = new Recorder(root, "exclusive");
+  const recorder = createRecorder(root, "exclusive");
   await recorder.initialize();
   const finish = await registerSession(recorder.directory);
   await expect(registerSession(recorder.directory)).rejects.toThrow("active writer");
@@ -97,18 +98,18 @@ test("rejects a second writer for the same run and releases the lock on shutdown
 
 test("snapshots an in-flight query without changing live evidence or the later result", async () => {
   const root = await setup();
-  const recorder = new Recorder(root, "pending");
+  const recorder = createRecorder(root, "pending");
   await recorder.initialize();
   let resume!: () => void;
   let entered!: () => void;
   const gate = new Promise<void>((resolve) => { resume = resolve; });
   const started = new Promise<void>((resolve) => { entered = resolve; });
-  const running = recorder.execute({
+  const running = recorder.execute(mcpAdapter, {
     name: "kusto", arguments: { intent: "Check failures", command: "kusto_query", parameters: { database: "test", query: "print 1" } },
   }, async () => {
     entered();
     await gate;
-    return { content: [{ type: "text", text: "done" }] };
+    return { content: [{ type: "text" as const, text: "done" }] };
   });
   await started;
   try {
@@ -127,7 +128,7 @@ test("snapshots an in-flight query without changing live evidence or the later r
 
 test("a leftover writer lock prevents accidental reuse but not evidence export", async () => {
   const root = await setup();
-  const recorder = new Recorder(root, "interrupted");
+  const recorder = createRecorder(root, "interrupted");
   await recorder.initialize();
   await writeFile(join(recorder.directory, ".writer.lock"), "{}");
   await expect(registerSession(recorder.directory)).rejects.toThrow("locked");

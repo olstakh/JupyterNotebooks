@@ -110,6 +110,7 @@ class NotebookTests(unittest.TestCase):
     def test_generated_notebook_validates_and_runs_as_real_ipython_cells(self):
         entry = {
             "type": "execution",
+            "adapter": "mcp",
             "id": "E-abcd",
             "startedAt": "2026-01-01T00:00:00Z",
             "status": "succeeded",
@@ -123,9 +124,12 @@ class NotebookTests(unittest.TestCase):
             "result": {"content": [{"type": "text", "text": '{"status":200,"results":{"items":[{"Value":"long"},[7]]}}'}]},
         }
         module_path = str(ROOT / "tools" / "kusto-recorder" / "notebook.ts")
+        adapter_path = str(ROOT / "tools" / "kusto-recorder" / "adapters" / "mcp.ts")
         script = (
             f"import {{makeNotebook}} from {json.dumps(module_path)};"
-            f"console.log(JSON.stringify(makeNotebook('kernel-test', [{json.dumps(entry)}])));"
+            f"import {{mcpAdapter}} from {json.dumps(adapter_path)};"
+            f"console.log(JSON.stringify(makeNotebook('kernel-test', [{json.dumps(entry)}], "
+            "{adapters:[mcpAdapter], configurations:{mcp:null}})));"
         )
         completed = subprocess.run(
             ["bun", "--eval", script], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", check=True

@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { join, resolve } from "node:path";
-import { azureMcpVersion, inheritedEnvironment, parseReplayUpstream, recordingRoot, upstreamConfig } from "./config.js";
+import { inheritedEnvironment, parseReplayUpstream, recordingRoot } from "./config.js";
+import { azureMcpVersion, upstreamConfig } from "./adapters/mcp.js";
 
 test("keeps the original Azure launch as the no-argument default", () => {
   const config = upstreamConfig([]);

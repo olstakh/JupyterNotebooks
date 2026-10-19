@@ -2,14 +2,23 @@ import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Recorder, type Execution } from "./recorder.js";
-import { isQueryError, makeNotebook, renderResult } from "./notebook.js";
+import type { Execution } from "./recorder.js";
+import { createRecorder } from "./application.js";
+import { parseEntry } from "./model.js";
+import { isQueryError, mcpAdapter, renderResult } from "./adapters/mcp.js";
+import { makeNotebook as buildNotebook } from "./notebook.js";
+
+function makeNotebook(runId: string, entries: unknown[]) {
+  return buildNotebook(runId, entries.map((entry) => parseEntry(entry, true)), {
+    adapters: [mcpAdapter], configurations: { mcp: null },
+  });
+}
 
 const roots: string[] = [];
 async function setup(options: { debugJson?: boolean } = {}) {
   const root = await mkdtemp(join(tmpdir(), "kusto-recorder-test-"));
   roots.push(root);
-  const recorder = new Recorder(root, "test-run", options);
+  const recorder = createRecorder(root, "test-run", options);
   await recorder.initialize();
   return recorder;
 }
@@ -26,7 +35,7 @@ const success = { content: [{ type: "text" as const, text: '{"status":200,"resul
 describe("durable recording", () => {
   test("persists intent before execution, original response, notes and a notebook", async () => {
     const recorder = await setup();
-    const { entry, result } = await recorder.execute(request, async () => {
+    const { entry, result } = await recorder.execute(mcpAdapter, request, async () => {
       const entries = await recorder.entries();
       expect(entries).toHaveLength(1);
       expect(entries[0]).toMatchObject({ status: "started", request });
@@ -54,14 +63,14 @@ describe("durable recording", () => {
   test("records tool errors without converting them to success", async () => {
     const recorder = await setup();
     const failure = { content: [{ type: "text" as const, text: "Permission denied" }], isError: true };
-    const { entry, result } = await recorder.execute(request, async () => failure);
-    expect(entry.status).toBe("tool_error");
+    const { entry, result } = await recorder.execute(mcpAdapter, request, async () => failure);
+    expect(entry.status).toBe("failed");
     expect(result.isError).toBe(true);
   });
 
   test("records uncertain outcomes for transport failures", async () => {
     const recorder = await setup();
-    await expect(recorder.execute(request, async () => { throw new Error("Timed out"); })).rejects.toThrow("may have reached Kusto");
+    await expect(recorder.execute(mcpAdapter, request, async () => { throw new Error("Timed out"); })).rejects.toThrow("may have reached Kusto");
     expect((await recorder.entries())[0]).toMatchObject({ status: "transport_error", error: "Timed out" });
   });
 
@@ -69,13 +78,13 @@ describe("durable recording", () => {
     const recorder = await setup();
     await rm(recorder.directory, { recursive: true });
     let executed = false;
-    await expect(recorder.execute(request, async () => { executed = true; return success; })).rejects.toThrow();
+    await expect(recorder.execute(mcpAdapter, request, async () => { executed = true; return success; })).rejects.toThrow();
     expect(executed).toBe(false);
   });
 
   test("withholds results when completion persistence fails", async () => {
     const recorder = await setup();
-    await expect(recorder.execute(request, async () => {
+    await expect(recorder.execute(mcpAdapter, request, async () => {
       await rename(recorder.directory, `${recorder.directory}-moved`);
       return success;
     })).rejects.toThrow("results withheld");
@@ -86,7 +95,7 @@ describe("durable recording", () => {
 
   test("reports uncertainty when upstream and final persistence both fail", async () => {
     const recorder = await setup();
-    await expect(recorder.execute(request, async () => {
+    await expect(recorder.execute(mcpAdapter, request, async () => {
       await rename(recorder.directory, `${recorder.directory}-moved`);
       throw new Error("Connection lost");
     })).rejects.toThrow("the query may have reached Kusto");
@@ -96,7 +105,7 @@ describe("durable recording", () => {
 
   test("concurrent calls remain distinct and notebook has every execution once", async () => {
     const recorder = await setup();
-    const results = await Promise.all(Array.from({ length: 8 }, () => recorder.execute(request, async () => success)));
+    const results = await Promise.all(Array.from({ length: 8 }, () => recorder.execute(mcpAdapter, request, async () => success)));
     const notebook = JSON.parse(await readFile(recorder.notebookPath, "utf8"));
     expect(await recorder.entries()).toHaveLength(8);
     for (const { entry } of results) {
@@ -107,7 +116,7 @@ describe("durable recording", () => {
   test("rejects invented evidence and path traversal in run IDs", async () => {
     const recorder = await setup();
     await expect(recorder.note({ kind: "conclusion", text: "Not supported.", evidence_ids: ["invented"] })).rejects.toThrow("unknown evidence");
-    expect(() => new Recorder(recorder.directory, "..\\escape")).toThrow("Investigation ID");
+    expect(() => createRecorder(recorder.directory, "..\\escape")).toThrow("Investigation ID");
   });
 
   test("imports legacy JSON records and labels unfinished executions", async () => {
@@ -116,7 +125,7 @@ describe("durable recording", () => {
       type: "execution", id: "E-abcd", status: "started", startedAt: "2026-01-01T00:00:00Z", request,
     }));
     await rm(recorder.notebookPath);
-    const reader = new Recorder(join(recorder.directory, ".."), recorder.runId);
+    const reader = createRecorder(join(recorder.directory, ".."), recorder.runId);
     await reader.exportNotebook();
     expect(await readFile(recorder.notebookPath, "utf8")).toContain("no outcome recorded");
     expect((await reader.entries())[0]).toMatchObject({ status: "started", request });
@@ -185,9 +194,9 @@ describe("durable recording", () => {
 
   test("reads all evidence from the notebook after reopening without per-call files", async () => {
     const recorder = await setup();
-    await recorder.execute(request, async () => success);
-    await recorder.execute({ name: "kusto", arguments: { learn: true } }, async () => success);
-    const reopened = new Recorder(join(recorder.directory, ".."), recorder.runId);
+    await recorder.execute(mcpAdapter, request, async () => success);
+    await recorder.execute(mcpAdapter, { name: "kusto", arguments: { learn: true } }, async () => success);
+    const reopened = createRecorder(join(recorder.directory, ".."), recorder.runId);
     expect(await reopened.entries()).toHaveLength(2);
     expect(await readdir(recorder.directory)).toEqual(["investigation.ipynb"]);
     await reopened.initialize();
@@ -198,25 +207,25 @@ describe("durable recording", () => {
     const root = await mkdtemp(join(tmpdir(), "kusto-upstream-recording-"));
     roots.push(root);
     const upstream = { command: "team-mcp", args: ["--team", "original"], cwd: root };
-    const recorder = new Recorder(root, "custom-run", { upstream, verifyUpstream: true });
+    const recorder = createRecorder(root, "custom-run", { upstream, verifyUpstream: true });
     await recorder.initialize();
-    await recorder.execute({ name: "team_query", arguments: { kql: "print 1" } }, async () => success);
-    const reader = new Recorder(root, "custom-run");
+    await recorder.execute(mcpAdapter, { name: "team_query", arguments: { kql: "print 1" } }, async () => success);
+    const reader = createRecorder(root, "custom-run");
     await reader.exportNotebook();
     const notebook = JSON.parse(await readFile(reader.notebookPath, "utf8"));
     expect(notebook.metadata.kusto_recorder.upstream).toEqual(upstream);
     expect(notebook.cells[2].source).toStartWith("%%mcp\n");
-    await expect(new Recorder(root, "custom-run", { verifyUpstream: true }).initialize()).rejects.toThrow("different upstream");
-    await expect(new Recorder(root, "custom-run", {
+    await expect(createRecorder(root, "custom-run", { verifyUpstream: true }).initialize()).rejects.toThrow("different upstream");
+    await expect(createRecorder(root, "custom-run", {
       upstream: { ...upstream, args: ["different"] }, verifyUpstream: true,
     }).initialize()).rejects.toThrow("different upstream");
   });
 
   test("does not treat a missing or corrupt source notebook as an empty investigation", async () => {
     const recorder = await setup();
-    await recorder.execute(request, async () => success);
+    await recorder.execute(mcpAdapter, request, async () => success);
     await writeFile(recorder.notebookPath, "{broken");
-    const reader = new Recorder(join(recorder.directory, ".."), recorder.runId);
+    const reader = createRecorder(join(recorder.directory, ".."), recorder.runId);
     await expect(reader.entries()).rejects.toThrow();
     await rm(recorder.notebookPath);
     await expect(reader.entries()).rejects.toThrow("missing");
@@ -226,13 +235,13 @@ describe("durable recording", () => {
     const recorder = await setup();
     await writeFile(recorder.notebookPath, (await readFile(recorder.notebookPath, "utf8")) + "\n");
     let executed = false;
-    await expect(recorder.execute(request, async () => { executed = true; return success; })).rejects.toThrow("changed outside");
+    await expect(recorder.execute(mcpAdapter, request, async () => { executed = true; return success; })).rejects.toThrow("changed outside");
     expect(executed).toBe(false);
   });
 
   test("writes optional debug files but never uses them over authoritative notebook evidence", async () => {
     const recorder = await setup({ debugJson: true });
-    const { entry } = await recorder.execute(request, async () => success);
+    const { entry } = await recorder.execute(mcpAdapter, request, async () => success);
     const debug = join(recorder.directory, "debug");
     expect((await readdir(debug)).sort()).toEqual([`${entry.id}.json`, `${entry.id}.started.json`].sort());
     expect(JSON.parse(await readFile(join(debug, `${entry.id}.started.json`), "utf8")).status).toBe("started");
@@ -242,9 +251,9 @@ describe("durable recording", () => {
 
   test("does not fall back to debug copies if the authoritative notebook is corrupt", async () => {
     const recorder = await setup({ debugJson: true });
-    await recorder.execute(request, async () => success);
+    await recorder.execute(mcpAdapter, request, async () => success);
     await writeFile(recorder.notebookPath, "{broken");
-    const reader = new Recorder(join(recorder.directory, ".."), recorder.runId);
+    const reader = createRecorder(join(recorder.directory, ".."), recorder.runId);
     await expect(reader.entries()).rejects.toThrow();
   });
 
@@ -253,7 +262,7 @@ describe("durable recording", () => {
     await writeFile(join(recorder.directory, "debug"), "not a directory");
     const errors = spyOn(console, "error").mockImplementation(() => {});
     try {
-      await recorder.execute(request, async () => success);
+      await recorder.execute(mcpAdapter, request, async () => success);
       expect(errors).toHaveBeenCalled();
       expect((await recorder.entries())[0]).toMatchObject({ status: "succeeded", result: success });
     } finally {
@@ -264,29 +273,29 @@ describe("durable recording", () => {
   test("records query-payload failures as failed executions", async () => {
     const recorder = await setup();
     const result = { content: [{ type: "text" as const, text: '{"status":403,"message":"Denied"}' }] };
-    const { entry } = await recorder.execute(request, async () => result);
-    expect(entry.status).toBe("tool_error");
-    expect((await recorder.entries())[0]).toMatchObject({ status: "tool_error", result });
+    const { entry } = await recorder.execute(mcpAdapter, request, async () => result);
+    expect(entry.status).toBe("failed");
+    expect((await recorder.entries())[0]).toMatchObject({ status: "failed", result });
   });
 
   test("migrates older notebook cell metadata without losing original requests", async () => {
     const recorder = await setup();
-    const entry: Execution = { type: "execution", id: "E-abcd", startedAt: "2026-01-01T00:00:00Z", status: "succeeded", request, result: success };
+    const entry: Execution = { type: "execution", adapter: "mcp", id: "E-abcd", startedAt: "2026-01-01T00:00:00Z", status: "succeeded", request, result: success };
     await writeFile(recorder.notebookPath, JSON.stringify({
       nbformat: 4, metadata: { kusto_recorder: { run_id: recorder.runId, notes: [] } },
       cells: [{ id: entry.id, metadata: { evidence_id: entry.id, kusto_recorder: entry } }],
     }));
-    const reopened = new Recorder(join(recorder.directory, ".."), recorder.runId);
+    const reopened = createRecorder(join(recorder.directory, ".."), recorder.runId);
     await reopened.initialize();
     expect(await reopened.entries()).toEqual([entry]);
-    expect(JSON.parse(await readFile(recorder.notebookPath, "utf8")).metadata.kusto_recorder.format_version).toBe(2);
+    expect(JSON.parse(await readFile(recorder.notebookPath, "utf8")).metadata.kusto_recorder.format_version).toBe(3);
   });
 
   test("serializes pending and complete writes while a different reader snapshots the notebook", async () => {
     const recorder = await setup();
-    const reader = new Recorder(join(recorder.directory, ".."), recorder.runId);
+    const reader = createRecorder(join(recorder.directory, ".."), recorder.runId);
     const completed = await Promise.allSettled([
-      ...Array.from({ length: 12 }, () => recorder.execute(request, async () => success)),
+      ...Array.from({ length: 12 }, () => recorder.execute(mcpAdapter, request, async () => success)),
       ...Array.from({ length: 12 }, () => reader.entries()),
     ]);
     expect(completed.every((result) => result.status === "fulfilled")).toBe(true);

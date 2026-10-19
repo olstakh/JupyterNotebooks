@@ -7,6 +7,7 @@ import {
   type CallToolResult, type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
 import { Recorder } from "./recorder.js";
+import { mcpAdapter } from "./adapters/mcp.js";
 import { registerSession } from "./sessions.js";
 
 const localTools: Tool[] = [
@@ -89,7 +90,7 @@ export async function startProxy(recorder: Recorder, upstream: StdioServerParame
           notes: entries.filter((entry) => entry.type === "note").length,
         });
       }
-      const { result } = await recorder.execute(request.params, async () =>
+      const { result } = await recorder.execute(mcpAdapter, request.params, async () =>
         CallToolResultSchema.parse(await client.callTool(request.params, CallToolResultSchema, { timeout: 180000, signal: extra.signal })),
       );
       return result;

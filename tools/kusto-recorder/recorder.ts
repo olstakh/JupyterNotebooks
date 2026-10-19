@@ -1,71 +1,15 @@
 import { mkdir, open, readFile, readdir, rename, unlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
-import type { CallToolRequest, CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { CallToolRequestSchema, CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
-import { isQueryError, makeNotebook } from "./notebook.js";
-import { parseReplayUpstream, type ReplayUpstream } from "./config.js";
-
-export type Execution = {
-  type: "execution";
-  id: string;
-  startedAt: string;
-  finishedAt?: string;
-  status: "started" | "succeeded" | "tool_error" | "transport_error";
-  request: CallToolRequest["params"];
-  result?: CallToolResult;
-  error?: string;
-};
-
-export type InvestigationNote = {
-  type: "note";
-  id: string;
-  startedAt: string;
-  kind: "plan" | "observation" | "conclusion";
-  text: string;
-  evidenceIds: string[];
-};
-
-export type Entry = Execution | InvestigationNote;
-
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
+import { makeNotebook, type NotebookOptions } from "./notebook.js";
+import {
+  isObject, jsonObject, jsonValue, parseEntry,
+  type Entry, type Execution, type ExecutionAdapter, type InvestigationNote, type JsonObject,
+} from "./model.js";
+export type { Entry, Execution, InvestigationNote } from "./model.js";
 
 function isMissing(error: unknown): boolean {
   return error instanceof Error && "code" in error && error.code === "ENOENT";
-}
-
-function parseEntry(value: unknown): Entry {
-  if (!isObject(value) || typeof value.id !== "string" || typeof value.startedAt !== "string"
-    || !Number.isFinite(Date.parse(value.startedAt))) throw new Error("Invalid notebook evidence entry.");
-  if (value.type === "note" && /^N-[\da-f-]+$/.test(value.id)) {
-    const { kind, text, evidenceIds } = value;
-    if ((kind !== "plan" && kind !== "observation" && kind !== "conclusion") || typeof text !== "string"
-      || !Array.isArray(evidenceIds) || !evidenceIds.every((id): id is string => typeof id === "string")) {
-      throw new Error(`Invalid notebook note ${value.id}.`);
-    }
-    return { type: "note", id: value.id, startedAt: value.startedAt, kind, text, evidenceIds };
-  }
-  if (value.type !== "execution" || !/^E-[\da-f-]+$/.test(value.id)) throw new Error("Invalid notebook evidence type or ID.");
-  const { status, finishedAt, error } = value;
-  if (status !== "started" && status !== "succeeded" && status !== "tool_error" && status !== "transport_error") {
-    throw new Error(`Invalid execution status for ${value.id}.`);
-  }
-  if (finishedAt !== undefined && (typeof finishedAt !== "string" || !Number.isFinite(Date.parse(finishedAt)))) {
-    throw new Error(`Invalid completion time for ${value.id}.`);
-  }
-  if (error !== undefined && typeof error !== "string") throw new Error(`Invalid error for ${value.id}.`);
-  const request = CallToolRequestSchema.parse({ method: "tools/call", params: value.request }).params;
-  const result = value.result === undefined ? undefined : CallToolResultSchema.parse(value.result);
-  if ((status === "succeeded" || status === "tool_error") && !result) throw new Error(`Missing response for ${value.id}.`);
-  if (status === "transport_error" && typeof error !== "string") throw new Error(`Missing transport error for ${value.id}.`);
-  return {
-    type: "execution", id: value.id, startedAt: value.startedAt, status, request,
-    ...(typeof finishedAt === "string" ? { finishedAt } : {}),
-    ...(typeof error === "string" ? { error } : {}),
-    ...(result ? { result } : {}),
-  };
 }
 
 function sorted(entries: Entry[]): Entry[] {
@@ -74,6 +18,12 @@ function sorted(entries: Entry[]): Entry[] {
 
 function fingerprint(contents: string): string {
   return createHash("sha256").update(contents).digest("hex");
+}
+
+function configurationKey(value: JsonObject): string {
+  return JSON.stringify(value, (_, item: unknown) => isObject(item)
+    ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b)))
+    : item);
 }
 
 export async function atomicWrite(path: string, contents: string): Promise<void> {
@@ -108,15 +58,38 @@ export class Recorder {
   readonly notebookPath: string;
   private queue: Promise<void> = Promise.resolve();
   private expectedFingerprint?: string;
-  private upstream?: ReplayUpstream;
+  private configurations: JsonObject;
 
-  constructor(root: string, readonly runId: string, private readonly options: { debugJson?: boolean; upstream?: ReplayUpstream; verifyUpstream?: boolean } = {}) {
+  constructor(root: string, readonly runId: string, private readonly options: NotebookOptions & {
+    debugJson?: boolean; verifyConfigurations?: boolean;
+  } = {}) {
     if (!/^[a-zA-Z0-9_-]{1,100}$/.test(runId)) {
       throw new Error("Investigation ID must contain only letters, digits, underscores or hyphens (1-100 characters).");
     }
     this.directory = resolve(root, runId);
     this.notebookPath = join(this.directory, "investigation.ipynb");
-    this.upstream = options.upstream;
+    this.configurations = jsonObject(options.configurations ?? {});
+    const ids = (options.adapters ?? []).map((adapter) => adapter.id);
+    if (new Set(ids).size !== ids.length) throw new Error("Duplicate notebook adapter IDs.");
+    this.validateConfigurations();
+  }
+
+  private validateConfigurations(): void {
+    for (const adapter of this.options.adapters ?? []) {
+      if (this.configurations[adapter.id] !== undefined) adapter.validateConfiguration(this.configurations[adapter.id]);
+    }
+  }
+
+  private parseStoredEntry(value: unknown, legacy = false): Entry {
+    const entry = parseEntry(value, legacy);
+    if (entry.type === "execution") {
+      const adapter = this.options.adapters?.find((adapter) => adapter.id === entry.adapter);
+      if (adapter) {
+        adapter.validateConfiguration(this.configurations[adapter.id]);
+        adapter.validateEntry(entry);
+      }
+    }
+    return entry;
   }
 
   async initialize(): Promise<void> {
@@ -148,13 +121,16 @@ export class Recorder {
         || !Array.isArray(notebook.cells)) throw new Error("Invalid evidence notebook or run ID.");
       const metadata = notebook.metadata.kusto_recorder;
       if (metadata.format_version !== undefined) {
-        if (metadata.format_version !== 2 || !Array.isArray(metadata.entries)) throw new Error("Unsupported or invalid evidence notebook format.");
-        const upstream = metadata.upstream === undefined ? undefined : parseReplayUpstream(metadata.upstream);
-        if ((this.options.verifyUpstream || this.options.upstream) && JSON.stringify(upstream) !== JSON.stringify(this.options.upstream)) {
-          throw new Error("This investigation belongs to a different upstream MCP configuration. Use a new run ID.");
+        if ((metadata.format_version !== 2 && metadata.format_version !== 3) || !Array.isArray(metadata.entries)) throw new Error("Unsupported or invalid evidence notebook format.");
+        const configurations = metadata.format_version === 2
+          ? { mcp: metadata.upstream === undefined ? null : jsonValue(metadata.upstream) }
+          : jsonObject(metadata.adapter_configurations);
+        if (this.options.verifyConfigurations && configurationKey(configurations) !== configurationKey(jsonObject(this.options.configurations ?? {}))) {
+          throw new Error("This investigation belongs to a different upstream configuration. Use a new run ID.");
         }
-        this.upstream = upstream;
-        const entries = metadata.entries.map(parseEntry);
+        this.configurations = configurations;
+        this.validateConfigurations();
+        const entries = metadata.entries.map((entry) => this.parseStoredEntry(entry, metadata.format_version === 2));
         if (new Set(entries.map((entry) => entry.id)).size !== entries.length) throw new Error("Duplicate evidence IDs in notebook.");
         return sorted(entries);
       }
@@ -162,11 +138,13 @@ export class Recorder {
     const entries: Entry[] = [];
     if (isObject(notebook) && isObject(notebook.metadata) && isObject(notebook.metadata.kusto_recorder)) {
       const metadata = notebook.metadata.kusto_recorder;
-      if (Array.isArray(metadata.notes)) entries.push(...metadata.notes.map(parseEntry));
+      this.configurations = { mcp: metadata.upstream === undefined ? null : jsonValue(metadata.upstream) };
+      this.validateConfigurations();
+      if (Array.isArray(metadata.notes)) entries.push(...metadata.notes.map((entry) => this.parseStoredEntry(entry, true)));
       if (Array.isArray(notebook.cells)) {
         for (const cell of notebook.cells) {
           if (isObject(cell) && isObject(cell.metadata) && cell.metadata.kusto_recorder !== undefined) {
-            entries.push(parseEntry(cell.metadata.kusto_recorder));
+            entries.push(this.parseStoredEntry(cell.metadata.kusto_recorder, true));
           }
         }
       }
@@ -180,7 +158,7 @@ export class Recorder {
         throw error;
       }
       const files = names.filter((name) => /^[EN]-[\da-f-]+(?:\.started)?\.json$/.test(name));
-      entries.push(...await Promise.all(files.map(async (name) => parseEntry(JSON.parse(await readFile(join(directory, name), "utf8"))))));
+      entries.push(...await Promise.all(files.map(async (name) => this.parseStoredEntry(JSON.parse(await readFile(join(directory, name), "utf8")), true))));
     }
     if (notebook === undefined && entries.length === 0 && !allowNew) {
       throw new Error("Evidence notebook is missing and no legacy/debug records are available to recover it.");
@@ -212,11 +190,13 @@ export class Recorder {
 
   async snapshotNotebook() {
     const entries = await this.entries();
-    return makeNotebook(this.runId, entries, this.upstream);
+    return makeNotebook(this.runId, entries, { adapters: this.options.adapters, configurations: this.configurations });
   }
 
   private async writeNotebook(entries: Entry[]): Promise<void> {
-    const contents = JSON.stringify(makeNotebook(this.runId, sorted(entries.map(parseEntry)), this.upstream), null, 2);
+    const contents = JSON.stringify(makeNotebook(this.runId, sorted(entries.map((entry) => this.parseStoredEntry(entry))), {
+      adapters: this.options.adapters, configurations: this.configurations,
+    }), null, 2);
     await atomicWrite(this.notebookPath, contents);
     this.expectedFingerprint = fingerprint(contents);
   }
@@ -238,19 +218,21 @@ export class Recorder {
     });
   }
 
-  async execute(
-    request: CallToolRequest["params"],
-    invoke: () => Promise<CallToolResult>,
-  ): Promise<{ entry: Execution; result: CallToolResult }> {
+  async execute<Request, Result>(
+    adapter: ExecutionAdapter<Request, Result>,
+    request: Request,
+    invoke: () => Promise<Result>,
+  ): Promise<{ entry: Execution; result: Result }> {
     const entry: Execution = {
       type: "execution",
       id: `E-${randomUUID()}`,
       startedAt: new Date().toISOString(),
       status: "started",
-      request,
+      adapter: adapter.id,
+      request: jsonValue(adapter.captureRequest(request)),
     };
     await this.save(entry);
-    let result: CallToolResult;
+    let result: Result;
     try {
       result = await invoke();
     } catch (error) {
@@ -264,10 +246,10 @@ export class Recorder {
       }
       throw new Error(`Upstream execution failed (${entry.id}); execution may have reached Kusto: ${entry.error}`);
     }
-    entry.status = isQueryError(result) ? "tool_error" : "succeeded";
-    entry.result = result;
-    entry.finishedAt = new Date().toISOString();
     try {
+      entry.status = adapter.isError(result) ? "failed" : "succeeded";
+      entry.result = jsonValue(adapter.captureResult(result));
+      entry.finishedAt = new Date().toISOString();
       await this.save(entry);
     } catch (error) {
       throw new Error(`Recording failed after upstream execution (${entry.id}); results withheld.`, { cause: error });

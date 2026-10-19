@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { recordingRoot, upstreamConfig } from "./config.js";
-import { Recorder } from "./recorder.js";
+import { recordingRoot } from "./config.js";
+import { upstreamConfig } from "./adapters/mcp.js";
+import { createRecorder } from "./application.js";
 import { startProxy } from "./proxy.js";
 
 const runId = process.env.KUSTO_INVESTIGATION_ID
@@ -9,7 +10,7 @@ const debug = process.env.KUSTO_DEBUG_JSON;
 if (debug !== undefined && debug !== "0" && debug !== "1") throw new Error("KUSTO_DEBUG_JSON must be 0 or 1.");
 try {
   const upstream = upstreamConfig();
-  const recorder = new Recorder(recordingRoot(), runId, {
+  const recorder = createRecorder(recordingRoot(), runId, {
     debugJson: debug === "1",
     verifyUpstream: true,
     ...(process.argv.length > 2 ? {
