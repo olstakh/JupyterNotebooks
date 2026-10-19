@@ -4,6 +4,11 @@ import type { StdioServerParameters } from "@modelcontextprotocol/sdk/client/std
 export const projectRoot = resolve(import.meta.dir, "..", "..");
 export const azureMcpVersion = "3.0.0";
 
+export function recordingRoot(value = process.env.KUSTO_RECORDING_DIR, cwd = process.cwd()): string {
+  if (value !== undefined && !value.trim()) throw new Error("KUSTO_RECORDING_DIR must not be empty.");
+  return resolve(cwd, value ?? ".investigations");
+}
+
 export type ReplayUpstream = {
   command: string;
   args: string[];
@@ -43,7 +48,7 @@ export function upstreamConfig(args = process.argv.slice(2)): StdioServerParamet
   return {
     command: process.execPath,
     args: ["x", `@azure/mcp@${azureMcpVersion}`, "server", "start", "--namespace", "kusto", "--read-only"],
-    cwd: projectRoot,
+    cwd: process.cwd(),
     env: inheritedEnvironment(),
     stderr: "inherit",
   };

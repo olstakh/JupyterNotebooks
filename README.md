@@ -4,6 +4,65 @@ A local stdio MCP tool proxy that runs your existing Kusto MCP server and durabl
 forwarded tool call in a Jupyter notebook. No Jupyter server
 or Kqlmagic is needed to record or export.
 
+## Install the local package in another repository
+
+Prerequisite: Bun 1.3.13 or later. No source checkout is needed by consumers.
+Copy the `.tgz` to an approved team location, then run this from the consuming
+repository (replace the archive path with its actual location):
+
+```powershell
+npm install --save-dev 'C:\packages\kusto-investigation-recorder-0.1.0.tgz'
+bun x --no-install kusto-recorder --help
+```
+
+The package includes the recorder runtime and Python notebook helper. Python with
+IPython/Jupyter is needed only to replay notebooks, not to record investigations.
+The dependency manifest and lockfile will reference the local archive, so keep
+that archive at a team-accessible location or have each teammate install their
+own copy. This is a trial distribution format, not a published registry package.
+
+In `.mcp.json`, change **only the selected Kusto server's launch configuration**.
+For example:
+
+```json
+{
+  "mcpServers": {
+    "team-kusto": {
+      "type": "stdio",
+      "command": "bun",
+      "args": [
+        "x", "--no-install", "kusto-recorder", "--",
+        "npx", "--yes", "@team/kusto-mcp", "--region", "eastus2"
+      ]
+    }
+  }
+}
+```
+
+Replace everything after `--` with the team's actual original command and
+arguments. Keep its existing `env`, working-directory, and approval settings.
+The team package in this example is illustrative, not an included dependency.
+Other MCP server entries remain unchanged. Reload the selected server afterward.
+
+By default evidence goes to **`<current working directory>\.investigations`**,
+normally the repository from which the agent runs. No `env` setting is required.
+To override it, add `"KUSTO_RECORDING_DIR": "other-evidence"` to that server's
+`env`, or use an absolute path. Relative overrides also resolve from the current
+working directory, never from the installed package directory.
+
+From the same repository, get evidence without asking the agent:
+
+```powershell
+bun x --no-install kusto-recorder evidence
+bun x --no-install kusto-recorder evidence --list
+bun x --no-install kusto-recorder evidence --run <run-id>
+```
+
+If the MCP registration overrides `KUSTO_RECORDING_DIR`, set the same value in the
+export terminal; the terminal does not inherit the MCP entry's environment.
+`--no-install` prevents the command from fetching an unrelated registry package
+when this local installation is missing.
+
 ## Start
 
 Prerequisites: Bun, an agent with local stdio MCP support, and existing Azure/Kusto
@@ -31,7 +90,7 @@ are retained alongside the recorder's instructions.
 
 ## Wrap an existing team's server
 
-Keep the same server name, environment, working directory, and original launch
+For a source-checkout trial, keep the same server name, environment, working directory, and original launch
 arguments. Change its command to Bun and prefix its original command/arguments
 with `run <absolute path to bootstrap.ts> --`.
 
@@ -73,8 +132,8 @@ including its version, authentication options, and read-only restrictions. Do
 not leave a second unwrapped registration active. Preserve any client-supported
 `cwd`, approval, or other per-server settings; the child runs in the working
 directory the MCP client gives the wrapper, with the wrapper's environment.
-Use an absolute `KUSTO_RECORDING_DIR` to place evidence in the consuming repository;
-otherwise output still defaults to this project's `.investigations` directory.
+Evidence defaults to `.investigations` under that working directory.
+`KUSTO_RECORDING_DIR` can override it with a relative or absolute path.
 
 This mode does not select Azure MCP, pin the team's package, change query
 arguments, or add flags. Running the wrapper with no arguments retains the
@@ -252,15 +311,18 @@ directory in the setup cell. Offline exports preserve the original upstream.
 
 Preserve a copy before re-running cells. Each setup execution creates a new replay
 run ID, shared by subsequent queries. Relative time expressions are re-evaluated:
-this is live replay, not historical reconstruction. If the project was moved or
-the notebook is opened elsewhere, set `KUSTO_RECORDER_ROOT` to the project folder.
-No credentials are embedded in the setup cell.
+this is live replay, not historical reconstruction. On another machine, install
+the recorder package in the notebook's repository; setup can discover the installed
+helper without the author's checkout. `KUSTO_RECORDER_ROOT` can explicitly select
+an installed package directory or source checkout. No environment credentials are
+embedded in the setup cell.
 
 ## Configuration
 
 Optional MCP `env` values:
 
-- `KUSTO_RECORDING_DIR`: output directory, relative to the project or absolute.
+- `KUSTO_RECORDING_DIR`: output directory, relative to the process working
+  directory or absolute. Defaults to `.investigations` under that working directory.
 - `KUSTO_INVESTIGATION_ID`: explicit run ID (letters, digits, `_`, `-`; up to 100
   characters). Defaults to a timestamp plus random suffix. Use a separate ID for
   each investigation. Concurrent writers using the same ID are rejected.
@@ -296,6 +358,31 @@ The demo makes two bounded live aggregate queries through the actual proxy and
 writes illustrative, scripted commentary. It is a wiring demonstration, not an
 autonomous incident diagnosis. It prints the resulting notebook path.
 
-Share the project files, lockfile, `.mcp.json`, and `AGENTS.md` with teammates.
-The launcher installs dependencies on first use; teammates provide their own approved Azure authentication.
-Do not distribute `.investigations` or `node_modules` by default.
+### Build and exercise the local archive
+
+From the source repository:
+
+```powershell
+New-Item -ItemType Directory -Force artifacts | Out-Null
+npm pack --pack-destination artifacts
+```
+
+This creates `artifacts\kusto-investigation-recorder-0.1.0.tgz`. The package
+allowlist includes only runtime files, the notebook helper, and documentation;
+investigation evidence, MCP configuration, dependencies, and tests are excluded.
+The package remains private to guard against accidental registry publication;
+`npm pack` and local archive installation still work. Nothing is published.
+
+The isolated installation smoke check also builds the archive, installs it in a
+temporary consuming repository, and exercises MCP recording, export, directory
+overrides, and replay:
+
+```powershell
+bun run test:package
+```
+
+Set `KUSTO_PACKAGE_TEST_PYTHON` to a Python interpreter with IPython and nbformat
+to additionally run an exported notebook using installed-helper discovery.
+The temporary consumer is removed afterward; the archive remains in `artifacts`.
+Dependency installation requires registry/cache access. Teammates still provide
+their own approved Kusto MCP server and authentication.

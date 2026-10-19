@@ -1,3 +1,5 @@
 node_modules/
 .investigations/
 __pycache__/
+artifacts/
+*.tgz

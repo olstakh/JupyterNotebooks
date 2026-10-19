@@ -19,12 +19,12 @@ def register(ipython, project_root, connections, upstream=None):
         if upstream is not None:
             env["KUSTO_REPLAY_UPSTREAM"] = json.dumps(upstream)
         completed = subprocess.run(
-            ["bun", "run", str(root / "tools" / "kusto-recorder" / "replay.ts"), "--notebook"],
+            ["bun", "run", str(root / "bin" / "kusto-recorder.js"), "replay", "--notebook"],
             input=json.dumps(request),
             text=True,
             encoding="utf-8",
             capture_output=True,
-            cwd=str(root),
+            cwd=str(Path.cwd()),
             env=env,
             timeout=420,
         )

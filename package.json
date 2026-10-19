@@ -3,9 +3,29 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "description": "Record an existing Kusto MCP server's tool calls as replayable investigation notebooks.",
+  "bin": {
+    "kusto-recorder": "bin/kusto-recorder.js"
+  },
+  "files": [
+    "bin/kusto-recorder.js",
+    "tools/kusto-recorder/config.ts",
+    "tools/kusto-recorder/evidence.ts",
+    "tools/kusto-recorder/index.ts",
+    "tools/kusto-recorder/kusto_notebook.py",
+    "tools/kusto-recorder/notebook.ts",
+    "tools/kusto-recorder/proxy.ts",
+    "tools/kusto-recorder/recorder.ts",
+    "tools/kusto-recorder/replay.ts",
+    "tools/kusto-recorder/sessions.ts"
+  ],
+  "engines": {
+    "bun": ">=1.3.13"
+  },
   "scripts": {
-    "start": "bun run \"tools\\kusto-recorder\\bootstrap.ts\"",
+    "start": "bun run \"bin\\kusto-recorder.js\"",
     "test": "bun test",
+    "test:package": "bun run \"tools\\kusto-recorder\\package-smoke.ts\"",
     "check": "tsc --noEmit",
     "demo": "bun run \"tools\\kusto-recorder\\demo.ts\"",
     "evidence": "bun run \"tools\\kusto-recorder\\evidence.ts\"",

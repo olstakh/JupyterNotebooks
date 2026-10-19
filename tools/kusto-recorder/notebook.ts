@@ -22,6 +22,7 @@ function setupSource(connections: Record<string, Connection>, upstream?: ReplayU
 import importlib.util
 import json
 import os
+import subprocess
 from pathlib import Path
 
 _root = Path(os.environ.get("KUSTO_RECORDER_ROOT", Path.cwd())).resolve()
@@ -29,7 +30,15 @@ _root = next((p for p in [_root, *_root.parents, Path(${JSON.stringify(projectRo
               if (p / "tools" / "kusto-recorder" / "kusto_notebook.py").is_file()), _root)
 _helper = _root / "tools" / "kusto-recorder" / "kusto_notebook.py"
 if not _helper.is_file():
-    raise FileNotFoundError("Set KUSTO_RECORDER_ROOT to the recorder project directory.")
+    _located = subprocess.run(
+        ["bun", "x", "--no-install", "kusto-recorder", "helper-path"],
+        capture_output=True, text=True, encoding="utf-8", timeout=30)
+    if _located.returncode != 0:
+        raise RuntimeError("Install kusto-investigation-recorder in this repository, or set KUSTO_RECORDER_ROOT to its installed package directory.\\n" + _located.stderr)
+    _helper = Path(_located.stdout.strip()).resolve()
+    if not _helper.is_file():
+        raise FileNotFoundError("The installed recorder returned a missing notebook helper: " + str(_helper))
+    _root = _helper.parents[2]
 _spec = importlib.util.spec_from_file_location("kusto_notebook", _helper)
 _module = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_module)

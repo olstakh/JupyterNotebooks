@@ -1,8 +1,8 @@
 import { readdir, stat } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { Recorder, atomicWrite } from "./recorder.js";
-import { projectRoot } from "./config.js";
+import { recordingRoot } from "./config.js";
 import { isMissing, isSessionActive, readSession } from "./sessions.js";
 
 export type Run = {
@@ -45,12 +45,12 @@ export async function listRuns(root: string): Promise<Run[]> {
 export function selectRun(runs: Run[], explicitId?: string): Run {
   if (explicitId) {
     const run = runs.find((candidate) => candidate.id === explicitId);
-    if (!run) throw new Error(`No recorded run named "${explicitId}". Use bun run evidence --list.`);
+    if (!run) throw new Error(`No recorded run named "${explicitId}". Use kusto-recorder evidence --list.`);
     return run;
   }
   const active = runs.filter((run) => run.active);
   if (active.length > 1) {
-    throw new Error(`Multiple recorder sessions are active; use bun run evidence --run <id>:\n${active.map((run) => run.id).join("\n")}`);
+    throw new Error(`Multiple recorder sessions are active; use kusto-recorder evidence --run <id>:\n${active.map((run) => run.id).join("\n")}`);
   }
   const selected = active[0] ?? runs.find((run) => run.executions > 0) ?? runs[0];
   if (!selected) throw new Error("No recorded investigations yet. Run a Kusto query through the configured MCP proxy first.");
@@ -65,13 +65,12 @@ export async function snapshotEvidence(root: string, runId: string): Promise<{ n
   return { notebook: path, executions: notebook.metadata.kusto_recorder.entries.filter((entry) => entry.type === "execution").length };
 }
 
-if (import.meta.main) {
+export async function evidence(args = process.argv.slice(2)): Promise<void> {
   try {
-    const args = process.argv.slice(2);
     if (args.length && !(args.length === 1 && args[0] === "--list") && !(args.length === 2 && args[0] === "--run" && args[1])) {
-      throw new Error("Usage: bun run evidence [--list | --run <id>]");
+      throw new Error("Usage: kusto-recorder evidence [--list | --run <id>]");
     }
-    const root = resolve(projectRoot, process.env.KUSTO_RECORDING_DIR ?? ".investigations");
+    const root = recordingRoot();
     const runs = await listRuns(root);
     if (args[0] === "--list") {
       if (!runs.length) console.log("No recorded investigations yet.");
@@ -88,3 +87,5 @@ if (import.meta.main) {
     process.exitCode = 1;
   }
 }
+
+if (import.meta.main) await evidence();
